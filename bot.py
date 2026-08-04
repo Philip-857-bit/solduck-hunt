@@ -5,7 +5,14 @@ from __future__ import annotations
 import logging
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -28,10 +35,40 @@ logger = logging.getLogger(__name__)
 
 PICK_RE = re.compile(r"^pick:(\d+):([0-8])$")
 
+PUBLIC_COMMANDS = (BotCommand("findsolduck", "Play Find SolDuck"),)
+ADMIN_COMMANDS = PUBLIC_COMMANDS + (
+    BotCommand("winnerlist", "Show recorded winners"),
+    BotCommand("stats", "Show game statistics"),
+)
+
+
+async def register_commands(application: Application) -> None:
+    """Register public and private admin command menus with Telegram."""
+    try:
+        await application.bot.set_my_commands(
+            PUBLIC_COMMANDS, scope=BotCommandScopeDefault()
+        )
+    except TelegramError as exc:
+        logger.warning("Could not register the public command menu: %s", exc)
+
+    for admin_id in sorted(config.ADMIN_IDS):
+        try:
+            await application.bot.set_my_commands(
+                ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Could not register the admin command menu for user %s: %s",
+                admin_id,
+                exc,
+            )
+
 
 def build_keyboard(game_id: int) -> InlineKeyboardMarkup:
     buttons = [
-        InlineKeyboardButton("⬜", callback_data=f"pick:{game_id}:{box}")
+        InlineKeyboardButton(
+            f"📦 {box + 1}", callback_data=f"pick:{game_id}:{box}"
+        )
         for box in range(game.BOX_COUNT)
     ]
     return InlineKeyboardMarkup(
@@ -46,7 +83,10 @@ def display_name(user) -> str:
     return full_name or f"User {user.id}"
 
 
-def cooldown_seconds() -> int:
+def cooldown_seconds_for(user_id: int) -> int:
+    """Admins may play repeatedly; all other users use the configured cooldown."""
+    if user_id in config.ADMIN_IDS:
+        return 0
     return config.COOLDOWN_HOURS * 3600
 
 
@@ -60,7 +100,7 @@ async def find_solduck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user.id,
         display_name(user),
         game.generate_hidden_slot(),
-        cooldown_seconds(),
+        cooldown_seconds_for(user.id),
     )
     if result.status is db.StartStatus.COOLDOWN:
         await message.reply_text(messages.cooldown_message())
@@ -126,7 +166,7 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         query.from_user.id,
         display_name(query.from_user),
         selected_box,
-        cooldown_seconds(),
+        cooldown_seconds_for(query.from_user.id),
     )
 
     alerts = {
@@ -212,7 +252,12 @@ async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_application() -> Application:
-    app = ApplicationBuilder().token(config.BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(config.BOT_TOKEN)
+        .post_init(register_commands)
+        .build()
+    )
     app.add_handler(CommandHandler("findsolduck", find_solduck))
     app.add_handler(CommandHandler("winnerlist", winnerlist))
     app.add_handler(CommandHandler("stats", stats))

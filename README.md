@@ -10,9 +10,11 @@ by an administrator. There is no wallet connection or blockchain integration.
 - The first valid box tap completes the game and starts the cooldown.
 - Re-running the command before tapping restores the same pending game.
 - When one board is resolved, every duplicate board is closed automatically.
+- Boxes use numbered `📦` buttons for a clearer 3×3 board.
 - Any selected box has exactly a 1-in-`WIN_CHANCE` chance to win (1 in 100 by
   default). Slots 0–8 represent the boxes and all remaining slots represent
   boards where SolDuck flew away.
+- Configured admins have no play cooldown and can test consecutive games.
 
 ## Setup
 
@@ -82,6 +84,11 @@ move storage to an external database.
 | `/findsolduck` | Everyone | Start or restore the daily game |
 | `/winnerlist` | Admins | Show every recorded winner, newest first |
 | `/stats` | Admins | Show completed games, winners, and players |
+
+The bot registers these command menus automatically at startup. The default
+menu shows only `/findsolduck`; each configured admin gets `/winnerlist` and
+`/stats` in the bot's private-chat menu as well. Handler authorization still
+checks the sender's numeric Telegram ID.
 
 ## Configuration
 

@@ -6,7 +6,7 @@ import subprocess
 import sqlite3
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -15,6 +15,7 @@ import config
 import db
 import game
 import messages
+from telegram import BotCommandScopeChat, BotCommandScopeDefault
 
 
 @pytest.fixture(autouse=True)
@@ -108,6 +109,29 @@ def test_main_runs_authenticated_webhook(monkeypatch):
     db.close.assert_called_once()
 
 
+def test_command_menus_are_registered_by_scope(monkeypatch):
+    telegram_bot = SimpleNamespace(set_my_commands=AsyncMock())
+    application = SimpleNamespace(bot=telegram_bot)
+    monkeypatch.setattr(config, "ADMIN_IDS", {22, 11})
+
+    asyncio.run(bot.register_commands(application))
+
+    calls = telegram_bot.set_my_commands.await_args_list
+    assert len(calls) == 3
+    public_commands, public_scope = calls[0].args[0], calls[0].kwargs["scope"]
+    assert [command.command for command in public_commands] == ["findsolduck"]
+    assert isinstance(public_scope, BotCommandScopeDefault)
+
+    admin_scopes = [call.kwargs["scope"] for call in calls[1:]]
+    assert all(isinstance(scope, BotCommandScopeChat) for scope in admin_scopes)
+    assert [scope.chat_id for scope in admin_scopes] == [11, 22]
+    assert all(
+        [command.command for command in call.args[0]]
+        == ["findsolduck", "winnerlist", "stats"]
+        for call in calls[1:]
+    )
+
+
 def test_docker_database_defaults_to_app_owned_directory():
     dockerfile = (
         Path(__file__).resolve().parents[1] / "Dockerfile"
@@ -141,8 +165,26 @@ def test_keyboard_is_a_three_by_three_grid():
     keyboard = bot.build_keyboard(17)
     assert len(keyboard.inline_keyboard) == 3
     assert all(len(row) == 3 for row in keyboard.inline_keyboard)
+    labels = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert labels == [f"📦 {box}" for box in range(1, 10)]
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
     assert callbacks == [f"pick:17:{box}" for box in range(9)]
+
+
+def test_admin_can_complete_games_without_cooldown(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_IDS", {1})
+    admin_cooldown = bot.cooldown_seconds_for(1)
+    assert admin_cooldown == 0
+    assert bot.cooldown_seconds_for(2) == config.COOLDOWN_HOURS * 3600
+
+    first = db.start_or_resume_game(1, "@admin", 0, admin_cooldown, now=100)
+    assert (
+        db.resolve_game(first.game_id, 1, "@admin", 0, admin_cooldown, now=100)
+        is db.ResolveStatus.WON
+    )
+    second = db.start_or_resume_game(1, "@admin", 1, admin_cooldown, now=100)
+    assert second.status is db.StartStatus.READY
+    assert second.game_id != first.game_id
 
 
 def test_opening_board_does_not_start_cooldown_and_reuses_pending_game():
