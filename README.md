@@ -9,6 +9,7 @@ by an administrator. There is no wallet connection or blockchain integration.
 - `/findsolduck` shows a 3×3 inline-button board.
 - The first valid box tap completes the game and starts the cooldown.
 - Re-running the command before tapping restores the same pending game.
+- When one board is resolved, every duplicate board is closed automatically.
 - Any selected box has exactly a 1-in-`WIN_CHANCE` chance to win (1 in 100 by
   default). Slots 0–8 represent the boxes and all remaining slots represent
   boards where SolDuck flew away.
@@ -17,20 +18,31 @@ by an administrator. There is no wallet connection or blockchain integration.
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
 2. Obtain the numeric Telegram user IDs that should have admin access.
-3. Install and configure the bot:
+3. Prepare a public HTTPS endpoint such as
+   `https://bot.example.com/telegram` that proxies to the bot's internal port.
+4. Install and configure the bot:
 
 ```powershell
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Fill in `BOT_TOKEN` and `ADMIN_IDS` in `.env`, then run:
+Fill in the required values in `.env`. Generate a webhook secret with:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Then run:
 
 ```powershell
 python bot.py
 ```
 
-The bot uses Telegram long polling, so v1 does not require a domain or webhook.
+At startup the bot registers `WEBHOOK_URL` with Telegram and verifies every
+request using Telegram's `X-Telegram-Bot-Api-Secret-Token` header. TLS should be
+terminated by the hosting platform or a reverse proxy; the built-in listener
+serves HTTP internally on `WEBHOOK_LISTEN:PORT`.
 
 ## Docker
 
@@ -41,13 +53,27 @@ the SQLite database:
 docker build -t solduck-bot .
 docker run -d --name solduck-bot --restart unless-stopped `
   --env-file .env `
-  --mount source=solduck-data,target=/data `
+  --publish 8080:8080 `
+  --mount source=solduck-data,target=/app/data `
   solduck-bot
 ```
 
 The image runs as an unprivileged user, does not copy `.env` into the image, and
-uses `/data/solduck.db` by default. Back up the `solduck-data` volume to preserve
-cooldowns and winner records when moving hosts.
+uses `/app/data/solduck.db` by default. Back up the `solduck-data` volume to
+preserve cooldowns and winner records when moving hosts.
+
+### Render
+
+For a Render Docker web service, set `WEBHOOK_URL` to your service URL plus the
+webhook path, for example `https://your-service.onrender.com/telegram`. Do not
+set `DB_PATH=solduck.db`; either omit it to use `/app/data/solduck.db` or set that
+absolute path explicitly.
+
+Render free web services have an ephemeral filesystem and cannot attach a
+persistent disk. The bot will run, but SQLite cooldowns, statistics, and winner
+records are erased whenever the service restarts, redeploys, or spins down. For
+reliable rewards, use a paid Render persistent disk mounted at `/app/data` or
+move storage to an external database.
 
 ## Commands
 
@@ -63,11 +89,15 @@ cooldowns and winner records when moving hosts.
 |---|---:|---|
 | `BOT_TOKEN` | — | Required token from BotFather |
 | `ADMIN_IDS` | — | Required comma-separated numeric user IDs |
+| `WEBHOOK_URL` | — | Required public HTTPS URL including its path |
+| `WEBHOOK_SECRET` | — | Required 16–256 character request-verification secret |
+| `WEBHOOK_LISTEN` | `0.0.0.0` | Internal listener address |
+| `PORT` | `8080` | Internal listener port |
 | `WIN_CHANCE` | `100` | Must be at least 9 |
 | `COOLDOWN_HOURS` | `24` | Rolling cooldown after a box tap |
 | `PRIZE_AMOUNT` | `10000` | Recorded with each winner |
 | `PRIZE_TOKEN` | `SOLDUCK` | Recorded with each winner |
-| `DB_PATH` | `solduck.db` | SQLite database location |
+| `DB_PATH` | Runtime-specific | Local default `solduck.db`; Docker default `/app/data/solduck.db` |
 
 ## Tests
 

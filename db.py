@@ -10,7 +10,7 @@ from enum import Enum
 
 import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE players (
   user_id      INTEGER PRIMARY KEY,
@@ -48,7 +48,28 @@ CREATE TABLE winners (
   won_at       INTEGER NOT NULL
 );
 
-PRAGMA user_version = 1;
+CREATE TABLE game_messages (
+  game_id    INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  chat_id    INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id)
+);
+
+CREATE INDEX game_messages_game_id ON game_messages(game_id);
+
+PRAGMA user_version = 2;
+"""
+
+MIGRATE_1_TO_2 = """
+CREATE TABLE game_messages (
+  game_id    INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  chat_id    INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id)
+);
+
+CREATE INDEX game_messages_game_id ON game_messages(game_id);
+PRAGMA user_version = 2;
 """
 
 _conn: sqlite3.Connection | None = None
@@ -90,6 +111,8 @@ def init(db_path: str | None = None) -> None:
     ).fetchone()
     if version == 0 and not has_tables:
         connection.executescript(SCHEMA)
+    elif version == 1:
+        connection.executescript(MIGRATE_1_TO_2)
     elif version != SCHEMA_VERSION:
         connection.close()
         raise RuntimeError(
@@ -248,6 +271,47 @@ def resolve_game(
 def get_game(game_id: int) -> sqlite3.Row | None:
     with _lock:
         return _db().execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
+
+
+def record_game_message(game_id: int, chat_id: int, message_id: int) -> bool:
+    """Register a board message only while its game is still pending."""
+    with _lock:
+        connection = _db()
+        pending = connection.execute(
+            "SELECT 1 FROM games WHERE id = ? AND played_at IS NULL", (game_id,)
+        ).fetchone()
+        if pending is None:
+            return False
+        connection.execute(
+            """
+            INSERT INTO game_messages (game_id, chat_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, message_id) DO UPDATE SET game_id = excluded.game_id
+            """,
+            (game_id, chat_id, message_id),
+        )
+        return True
+
+
+def list_game_messages(game_id: int) -> list[sqlite3.Row]:
+    with _lock:
+        return _db().execute(
+            """
+            SELECT game_id, chat_id, message_id
+            FROM game_messages
+            WHERE game_id = ?
+            ORDER BY chat_id, message_id
+            """,
+            (game_id,),
+        ).fetchall()
+
+
+def remove_game_message(chat_id: int, message_id: int) -> None:
+    with _lock:
+        _db().execute(
+            "DELETE FROM game_messages WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id),
+        )
 
 
 def list_winners() -> list[sqlite3.Row]:

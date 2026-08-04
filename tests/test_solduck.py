@@ -3,8 +3,10 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -47,6 +49,72 @@ def test_configuration_rejects_chance_below_box_count(monkeypatch):
     monkeypatch.setattr(config, "WIN_CHANCE", 8)
     with pytest.raises(ValueError, match="at least 9"):
         config.validate(require_credentials=False)
+
+
+def test_webhook_configuration_requires_secure_public_url(monkeypatch):
+    monkeypatch.setattr(config, "WEBHOOK_URL", "http://example.com/telegram")
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "a-secure_token-123")
+    with pytest.raises(ValueError, match="public HTTPS URL"):
+        config.validate(require_credentials=False)
+
+
+def test_webhook_configuration_rejects_weak_secret(monkeypatch):
+    monkeypatch.setattr(config, "WEBHOOK_URL", "https://example.com/telegram")
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "short")
+    with pytest.raises(ValueError, match="16-256"):
+        config.validate(require_credentials=False)
+
+
+def test_webhook_configuration_rejects_unsupported_public_port(monkeypatch):
+    monkeypatch.setattr(
+        config, "WEBHOOK_URL", "https://example.com:8080/telegram"
+    )
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "a-secure_token-123")
+    with pytest.raises(ValueError, match="Telegram-supported port"):
+        config.validate(require_credentials=False)
+
+
+def test_webhook_path_is_derived_from_public_url(monkeypatch):
+    monkeypatch.setattr(
+        config, "WEBHOOK_URL", "https://example.com/hooks/telegram"
+    )
+    assert config.webhook_path() == "hooks/telegram"
+
+
+def test_main_runs_authenticated_webhook(monkeypatch):
+    application = SimpleNamespace(run_webhook=Mock())
+    monkeypatch.setattr(config, "load", Mock())
+    monkeypatch.setattr(config, "WEBHOOK_LISTEN", "0.0.0.0")
+    monkeypatch.setattr(config, "PORT", 8080)
+    monkeypatch.setattr(config, "WEBHOOK_URL", "https://example.com/telegram")
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "a-secure_token-123")
+    monkeypatch.setattr(config, "WIN_CHANCE", 100)
+    monkeypatch.setattr(bot, "build_application", lambda: application)
+    monkeypatch.setattr(db, "init", Mock())
+    monkeypatch.setattr(db, "close", Mock())
+
+    bot.main()
+
+    application.run_webhook.assert_called_once_with(
+        listen="0.0.0.0",
+        port=8080,
+        url_path="telegram",
+        webhook_url="https://example.com/telegram",
+        secret_token="a-secure_token-123",
+        allowed_updates=["message", "callback_query"],
+        bootstrap_retries=5,
+        drop_pending_updates=False,
+    )
+    db.close.assert_called_once()
+
+
+def test_docker_database_defaults_to_app_owned_directory():
+    dockerfile = (
+        Path(__file__).resolve().parents[1] / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "DB_PATH=/app/data/solduck.db" in dockerfile
+    assert "mkdir -p /app/data" in dockerfile
+    assert "chown solduck:solduck /app/data" in dockerfile
 
 
 def test_hidden_slot_uses_configured_probability_space(monkeypatch):
@@ -217,9 +285,10 @@ def test_malformed_numeric_environment_has_concise_startup_error():
 
 
 class FakeQuery:
-    def __init__(self, data, user):
+    def __init__(self, data, user, chat_id=100, message_id=200):
         self.data = data
         self.from_user = user
+        self.message = SimpleNamespace(chat_id=chat_id, message_id=message_id)
         self.answers = []
         self.edited_text = None
 
@@ -231,11 +300,112 @@ class FakeQuery:
 
 
 class FakeMessage:
-    def __init__(self):
+    def __init__(self, chat_id=100, reply_message_id=200):
+        self.chat_id = chat_id
+        self.reply_message_id = reply_message_id
         self.replies = []
 
     async def reply_text(self, text, reply_markup=None):
         self.replies.append((text, reply_markup))
+        return SimpleNamespace(
+            chat_id=self.chat_id,
+            message_id=self.reply_message_id,
+            edit_text=self._edit_text,
+        )
+
+    async def _edit_text(self, text):
+        self.replies.append((text, None))
+
+
+class FakeBot:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_message_text(self, text, chat_id, message_id):
+        self.edits.append((text, chat_id, message_id))
+
+
+def test_find_command_registers_each_duplicate_board():
+    pending = start(user_id=1, hidden_slot=4)
+    user = SimpleNamespace(id=1, username="alice", full_name="Alice")
+    first_message = FakeMessage(chat_id=10, reply_message_id=101)
+    second_message = FakeMessage(chat_id=20, reply_message_id=202)
+
+    asyncio.run(
+        bot.find_solduck(
+            SimpleNamespace(effective_user=user, effective_message=first_message), None
+        )
+    )
+    asyncio.run(
+        bot.find_solduck(
+            SimpleNamespace(effective_user=user, effective_message=second_message), None
+        )
+    )
+
+    locations = {
+        (row["chat_id"], row["message_id"])
+        for row in db.list_game_messages(pending.game_id)
+    }
+    assert locations == {(10, 101), (20, 202)}
+
+
+def test_resolving_one_board_closes_every_duplicate():
+    pending = start(user_id=1, hidden_slot=4)
+    db.record_game_message(pending.game_id, chat_id=10, message_id=101)
+    db.record_game_message(pending.game_id, chat_id=20, message_id=202)
+    user = SimpleNamespace(id=1, username="alice", full_name="Alice")
+    query = FakeQuery(
+        f"pick:{pending.game_id}:4", user, chat_id=10, message_id=101
+    )
+    context = SimpleNamespace(bot=FakeBot())
+
+    asyncio.run(bot.handle_pick(SimpleNamespace(callback_query=query), context))
+
+    assert query.edited_text == messages.winner_message()
+    assert context.bot.edits == [(messages.GAME_OVER_MESSAGE, 20, 202)]
+
+
+def test_tapping_stale_duplicate_replaces_its_board():
+    pending = start(user_id=1, hidden_slot=4)
+    db.record_game_message(pending.game_id, chat_id=20, message_id=202)
+    assert resolve(pending.game_id, box=4) is db.ResolveStatus.WON
+    user = SimpleNamespace(id=1, username="alice", full_name="Alice")
+    query = FakeQuery(
+        f"pick:{pending.game_id}:4", user, chat_id=20, message_id=202
+    )
+
+    asyncio.run(
+        bot.handle_pick(
+            SimpleNamespace(callback_query=query), SimpleNamespace(bot=FakeBot())
+        )
+    )
+
+    assert query.edited_text == messages.GAME_OVER_MESSAGE
+    assert db.list_game_messages(pending.game_id) == []
+
+
+def test_schema_v1_database_is_migrated_for_board_tracking(tmp_path):
+    database_path = tmp_path / "schema-v1.db"
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """
+        CREATE TABLE players (user_id INTEGER PRIMARY KEY);
+        CREATE TABLE games (id INTEGER PRIMARY KEY);
+        PRAGMA user_version = 1;
+        """
+    )
+    connection.close()
+
+    db.init(str(database_path))
+
+    probe = sqlite3.connect(database_path)
+    version = probe.execute("PRAGMA user_version").fetchone()[0]
+    table = probe.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'game_messages'"
+    ).fetchone()
+    probe.close()
+    assert version == 2
+    assert table[0] == "game_messages"
 
 
 def test_callback_handler_rejects_another_users_game():

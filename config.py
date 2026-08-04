@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -17,6 +19,12 @@ COOLDOWN_HOURS = 24
 PRIZE_AMOUNT = 10_000
 PRIZE_TOKEN = "SOLDUCK"
 DB_PATH = "solduck.db"
+WEBHOOK_URL = ""
+WEBHOOK_SECRET = ""
+WEBHOOK_LISTEN = "0.0.0.0"
+PORT = 8080
+
+_WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
 
 
 def _integer(name: str, default: str) -> int:
@@ -44,6 +52,7 @@ def load(*, require_credentials: bool = True) -> None:
     """Parse environment values, then validate the complete configuration."""
     global BOT_TOKEN, ADMIN_IDS, WIN_CHANCE, COOLDOWN_HOURS
     global PRIZE_AMOUNT, PRIZE_TOKEN, DB_PATH
+    global WEBHOOK_URL, WEBHOOK_SECRET, WEBHOOK_LISTEN, PORT
 
     bot_token = os.environ.get("BOT_TOKEN", "").strip()
     admin_ids = _admin_ids()
@@ -52,6 +61,10 @@ def load(*, require_credentials: bool = True) -> None:
     prize_amount = _integer("PRIZE_AMOUNT", "10000")
     prize_token = os.environ.get("PRIZE_TOKEN", "SOLDUCK").strip()
     db_path = os.environ.get("DB_PATH", "solduck.db").strip()
+    webhook_url = os.environ.get("WEBHOOK_URL", "").strip().rstrip("/")
+    webhook_secret = os.environ.get("WEBHOOK_SECRET", "").strip()
+    webhook_listen = os.environ.get("WEBHOOK_LISTEN", "0.0.0.0").strip()
+    port = _integer("PORT", "8080")
 
     BOT_TOKEN = bot_token
     ADMIN_IDS = admin_ids
@@ -60,7 +73,16 @@ def load(*, require_credentials: bool = True) -> None:
     PRIZE_AMOUNT = prize_amount
     PRIZE_TOKEN = prize_token
     DB_PATH = db_path
+    WEBHOOK_URL = webhook_url
+    WEBHOOK_SECRET = webhook_secret
+    WEBHOOK_LISTEN = webhook_listen
+    PORT = port
     validate(require_credentials=require_credentials)
+
+
+def webhook_path() -> str:
+    """Return the local URL path corresponding to WEBHOOK_URL."""
+    return urlsplit(WEBHOOK_URL).path.lstrip("/")
 
 
 def validate(*, require_credentials: bool = True) -> None:
@@ -69,6 +91,10 @@ def validate(*, require_credentials: bool = True) -> None:
         raise ValueError("BOT_TOKEN is required")
     if require_credentials and not ADMIN_IDS:
         raise ValueError("ADMIN_IDS must contain at least one Telegram user ID")
+    if require_credentials and not WEBHOOK_URL:
+        raise ValueError("WEBHOOK_URL is required")
+    if require_credentials and not WEBHOOK_SECRET:
+        raise ValueError("WEBHOOK_SECRET is required")
     if WIN_CHANCE < 9:
         raise ValueError("WIN_CHANCE must be at least 9 for a nine-box game")
     if COOLDOWN_HOURS <= 0:
@@ -79,3 +105,35 @@ def validate(*, require_credentials: bool = True) -> None:
         raise ValueError("PRIZE_TOKEN cannot be empty")
     if not DB_PATH:
         raise ValueError("DB_PATH cannot be empty")
+    if not WEBHOOK_LISTEN:
+        raise ValueError("WEBHOOK_LISTEN cannot be empty")
+    if not 1 <= PORT <= 65_535:
+        raise ValueError("PORT must be between 1 and 65535")
+    if WEBHOOK_URL:
+        parsed_url = urlsplit(WEBHOOK_URL)
+        try:
+            public_port = parsed_url.port
+        except ValueError as exc:
+            raise ValueError("WEBHOOK_URL contains an invalid port") from exc
+        if (
+            parsed_url.scheme != "https"
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.query
+            or parsed_url.fragment
+            or not webhook_path()
+        ):
+            raise ValueError(
+                "WEBHOOK_URL must be a public HTTPS URL with a path and no "
+                "credentials, query, or fragment"
+            )
+        if public_port not in (None, 80, 88, 443, 8443):
+            raise ValueError(
+                "WEBHOOK_URL must use Telegram-supported port 443, 80, 88, or 8443"
+            )
+    if WEBHOOK_SECRET and not _WEBHOOK_SECRET_RE.fullmatch(WEBHOOK_SECRET):
+        raise ValueError(
+            "WEBHOOK_SECRET must be 16-256 characters using only letters, "
+            "numbers, underscores, or hyphens"
+        )

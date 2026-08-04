@@ -6,6 +6,7 @@ import logging
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -65,9 +66,48 @@ async def find_solduck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text(messages.cooldown_message())
         return
 
-    await message.reply_text(
+    board_message = await message.reply_text(
         messages.game_prompt(), reply_markup=build_keyboard(result.game_id)
     )
+    if not db.record_game_message(
+        result.game_id, board_message.chat_id, board_message.message_id
+    ):
+        await board_message.edit_text(messages.GAME_OVER_MESSAGE)
+
+
+def _query_location(query) -> tuple[int, int] | None:
+    message = query.message
+    if message is None:
+        return None
+    return message.chat_id, message.message_id
+
+
+async def _close_duplicate_boards(
+    context: ContextTypes.DEFAULT_TYPE,
+    game_id: int,
+    current_location: tuple[int, int] | None,
+) -> None:
+    if context is None:
+        return
+    for row in db.list_game_messages(game_id):
+        location = row["chat_id"], row["message_id"]
+        if location == current_location:
+            continue
+        try:
+            await context.bot.edit_message_text(
+                text=messages.GAME_OVER_MESSAGE,
+                chat_id=row["chat_id"],
+                message_id=row["message_id"],
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Could not close board message %s in chat %s: %s",
+                row["message_id"],
+                row["chat_id"],
+                exc,
+            )
+        else:
+            db.remove_game_message(row["chat_id"], row["message_id"])
 
 
 async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -92,19 +132,40 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     alerts = {
         db.ResolveStatus.NOT_FOUND: messages.GAME_NOT_FOUND_MESSAGE,
         db.ResolveStatus.NOT_OWNER: messages.NOT_YOUR_GAME_MESSAGE,
-        db.ResolveStatus.ALREADY_RESOLVED: messages.GAME_OVER_MESSAGE,
         db.ResolveStatus.COOLDOWN: messages.cooldown_message(),
     }
     if result in alerts:
         await query.answer(alerts[result], show_alert=True)
         return
 
+    current_location = _query_location(query)
+    if result is db.ResolveStatus.ALREADY_RESOLVED:
+        await query.answer()
+        try:
+            await query.edit_message_text(messages.GAME_OVER_MESSAGE)
+        except TelegramError:
+            logger.warning("Could not close already-resolved board", exc_info=True)
+        else:
+            if current_location is not None:
+                db.remove_game_message(*current_location)
+        await _close_duplicate_boards(context, game_id, current_location)
+        return
+
     await query.answer()
+    result_text: str
     if result is db.ResolveStatus.WON:
         logger.info("Winner recorded for Telegram user %s, game %s", query.from_user.id, game_id)
-        await query.edit_message_text(messages.winner_message())
+        result_text = messages.winner_message()
     else:
-        await query.edit_message_text(game.random_losing_message())
+        result_text = game.random_losing_message()
+    try:
+        await query.edit_message_text(result_text)
+    except TelegramError:
+        logger.warning("Could not replace selected board with its result", exc_info=True)
+    else:
+        if current_location is not None:
+            db.remove_game_message(*current_location)
+    await _close_duplicate_boards(context, game_id, current_location)
 
 
 def _is_admin(user_id: int) -> bool:
@@ -168,9 +229,22 @@ def main() -> None:
 
     db.init()
     app = build_application()
-    logger.info("Find SolDuck is running with a 1-in-%s win chance", config.WIN_CHANCE)
+    logger.info(
+        "Find SolDuck is serving %s with a 1-in-%s win chance",
+        config.WEBHOOK_URL,
+        config.WIN_CHANCE,
+    )
     try:
-        app.run_polling()
+        app.run_webhook(
+            listen=config.WEBHOOK_LISTEN,
+            port=config.PORT,
+            url_path=config.webhook_path(),
+            webhook_url=config.WEBHOOK_URL,
+            secret_token=config.WEBHOOK_SECRET,
+            allowed_updates=["message", "callback_query"],
+            bootstrap_retries=5,
+            drop_pending_updates=False,
+        )
     finally:
         db.close()
 
