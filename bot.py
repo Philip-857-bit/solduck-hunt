@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from telegram import (
     BotCommand,
@@ -11,6 +12,8 @@ from telegram import (
     BotCommandScopeDefault,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
+    InputMediaPhoto,
     Update,
 )
 from telegram.error import TelegramError
@@ -37,6 +40,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 PICK_RE = re.compile(r"^pick:(\d+):([0-8])$")
+ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
+GAME_BOARD_IMAGE = ASSET_DIRECTORY / "game-board.jpg"
+WINNER_IMAGE = ASSET_DIRECTORY / "winner.jpg"
 
 PUBLIC_COMMANDS = (BotCommand("findsolduck", "Play Find SolDuck"),)
 ADMIN_COMMANDS = PUBLIC_COMMANDS + (
@@ -89,6 +95,11 @@ def build_keyboard(game_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def image_upload(path: Path) -> InputFile:
+    """Build a reusable Telegram upload without leaving a file handle open."""
+    return InputFile(path.read_bytes(), filename=path.name)
+
+
 def display_name(user) -> str:
     if user.username:
         return f"@{user.username}"
@@ -122,13 +133,16 @@ async def find_solduck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    board_message = await message.reply_text(
-        messages.game_prompt(), reply_markup=build_keyboard(result.game_id)
+    board_message = await message.reply_photo(
+        photo=image_upload(GAME_BOARD_IMAGE),
+        caption=messages.game_prompt(),
+        reply_markup=build_keyboard(result.game_id),
     )
     if not db.record_game_message(
         result.game_id, board_message.chat_id, board_message.message_id
     ):
-        await board_message.edit_text(messages.GAME_OVER_MESSAGE)
+        await board_message.edit_reply_markup(reply_markup=None)
+        await board_message.edit_caption(caption=messages.GAME_OVER_MESSAGE)
 
 
 def _query_location(query) -> tuple[int, int] | None:
@@ -150,8 +164,13 @@ async def _close_duplicate_boards(
         if location == current_location:
             continue
         try:
-            await context.bot.edit_message_text(
-                text=messages.GAME_OVER_MESSAGE,
+            await context.bot.edit_message_reply_markup(
+                chat_id=row["chat_id"],
+                message_id=row["message_id"],
+                reply_markup=None,
+            )
+            await context.bot.edit_message_caption(
+                caption=messages.GAME_OVER_MESSAGE,
                 chat_id=row["chat_id"],
                 message_id=row["message_id"],
             )
@@ -198,7 +217,8 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if result is db.ResolveStatus.ALREADY_RESOLVED:
         await query.answer()
         try:
-            await query.edit_message_text(messages.GAME_OVER_MESSAGE)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_caption(caption=messages.GAME_OVER_MESSAGE)
         except TelegramError:
             logger.warning("Could not close already-resolved board", exc_info=True)
         else:
@@ -215,7 +235,16 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         result_text = game.random_losing_message()
     try:
-        await query.edit_message_text(result_text)
+        await query.edit_message_reply_markup(reply_markup=None)
+        if result is db.ResolveStatus.WON:
+            await query.edit_message_media(
+                media=InputMediaPhoto(
+                    media=image_upload(WINNER_IMAGE),
+                    caption=result_text,
+                )
+            )
+        else:
+            await query.edit_message_caption(caption=result_text)
     except TelegramError:
         logger.warning("Could not replace selected board with its result", exc_info=True)
     else:

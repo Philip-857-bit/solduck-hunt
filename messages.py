@@ -15,9 +15,7 @@ def prize_text() -> str:
 
 def game_prompt() -> str:
     return (
-        "🦆 Find SolDuck!\n\n"
-        "SolDuck is hiding behind one of these 9 boxes.\n\n"
-        "Pick ONE box.\n\n"
+        "🦆 Pick ONE box below.\n"
         f"🎁 Prize: {prize_text()} Tokens"
     )
 

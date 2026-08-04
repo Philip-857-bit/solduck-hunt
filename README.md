@@ -6,11 +6,12 @@ by an administrator. There is no wallet connection or blockchain integration.
 
 ## Game rules
 
-- `/findsolduck` shows a 3×3 inline-button board.
+- `/findsolduck` shows the branded game artwork with a 3×3 inline-button board.
 - The first valid box tap completes the game and starts the cooldown.
 - Cooldown responses show the exact days, hours, minutes, and seconds remaining.
 - Re-running the command before tapping restores the same pending game.
 - When one board is resolved, every duplicate board is closed automatically.
+- A winning tap replaces the game artwork with the branded winner image.
 - Boxes use numbered `📦` buttons for a clearer 3×3 board.
 - Any selected box has exactly a 1-in-`WIN_CHANCE` chance to win (1 in 100 by
   default). Slots 0–8 represent the boxes and all remaining slots represent

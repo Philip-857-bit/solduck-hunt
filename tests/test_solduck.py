@@ -216,6 +216,13 @@ def test_docker_database_defaults_to_app_owned_directory():
     assert "DB_PATH=/app/data/solduck.db" in dockerfile
     assert "mkdir -p /app/data" in dockerfile
     assert "chown solduck:solduck /app/data" in dockerfile
+    assert "COPY --chown=solduck:solduck assets ./assets" in dockerfile
+
+
+def test_game_and_winner_artwork_are_bundled():
+    for image_path in (bot.GAME_BOARD_IMAGE, bot.WINNER_IMAGE):
+        assert image_path.is_file()
+        assert image_path.read_bytes().startswith(b"\xff\xd8\xff")
 
 
 def test_hidden_slot_uses_configured_probability_space(monkeypatch):
@@ -417,6 +424,9 @@ class FakeQuery:
         self.message = SimpleNamespace(chat_id=chat_id, message_id=message_id)
         self.answers = []
         self.edited_text = None
+        self.edited_caption = None
+        self.edited_media = None
+        self.reply_markup_edits = []
 
     async def answer(self, text=None, show_alert=False):
         self.answers.append((text, show_alert))
@@ -424,12 +434,22 @@ class FakeQuery:
     async def edit_message_text(self, text):
         self.edited_text = text
 
+    async def edit_message_caption(self, caption):
+        self.edited_caption = caption
+
+    async def edit_message_media(self, media):
+        self.edited_media = media
+
+    async def edit_message_reply_markup(self, reply_markup=None):
+        self.reply_markup_edits.append(reply_markup)
+
 
 class FakeMessage:
     def __init__(self, chat_id=100, reply_message_id=200):
         self.chat_id = chat_id
         self.reply_message_id = reply_message_id
         self.replies = []
+        self.photos = []
 
     async def reply_text(self, text, reply_markup=None):
         self.replies.append((text, reply_markup))
@@ -442,13 +462,32 @@ class FakeMessage:
     async def _edit_text(self, text):
         self.replies.append((text, None))
 
+    async def reply_photo(self, photo, caption=None, reply_markup=None):
+        self.photos.append((photo, caption, reply_markup))
+        return SimpleNamespace(
+            chat_id=self.chat_id,
+            message_id=self.reply_message_id,
+            edit_reply_markup=AsyncMock(),
+            edit_caption=AsyncMock(),
+        )
+
 
 class FakeBot:
     def __init__(self):
         self.edits = []
+        self.caption_edits = []
+        self.reply_markup_edits = []
 
     async def edit_message_text(self, text, chat_id, message_id):
         self.edits.append((text, chat_id, message_id))
+
+    async def edit_message_caption(self, caption, chat_id, message_id):
+        self.caption_edits.append((caption, chat_id, message_id))
+
+    async def edit_message_reply_markup(
+        self, chat_id, message_id, reply_markup=None
+    ):
+        self.reply_markup_edits.append((reply_markup, chat_id, message_id))
 
 
 def test_find_command_registers_each_duplicate_board():
@@ -473,6 +512,10 @@ def test_find_command_registers_each_duplicate_board():
         for row in db.list_game_messages(pending.game_id)
     }
     assert locations == {(10, 101), (20, 202)}
+    assert first_message.photos[0][0].filename == "game-board.jpg"
+    assert second_message.photos[0][0].filename == "game-board.jpg"
+    assert first_message.photos[0][1] == messages.game_prompt()
+    assert second_message.photos[0][1] == messages.game_prompt()
 
 
 def test_resolving_one_board_closes_every_duplicate():
@@ -487,8 +530,10 @@ def test_resolving_one_board_closes_every_duplicate():
 
     asyncio.run(bot.handle_pick(SimpleNamespace(callback_query=query), context))
 
-    assert query.edited_text == messages.winner_message()
-    assert context.bot.edits == [(messages.GAME_OVER_MESSAGE, 20, 202)]
+    assert query.edited_media.caption == messages.winner_message()
+    assert query.edited_media.media.filename == "winner.jpg"
+    assert context.bot.caption_edits == [(messages.GAME_OVER_MESSAGE, 20, 202)]
+    assert context.bot.reply_markup_edits == [(None, 20, 202)]
 
 
 def test_tapping_stale_duplicate_replaces_its_board():
@@ -506,7 +551,8 @@ def test_tapping_stale_duplicate_replaces_its_board():
         )
     )
 
-    assert query.edited_text == messages.GAME_OVER_MESSAGE
+    assert query.edited_caption == messages.GAME_OVER_MESSAGE
+    assert query.reply_markup_edits == [None]
     assert db.list_game_messages(pending.game_id) == []
 
 
@@ -559,8 +605,26 @@ def test_callback_handler_records_and_displays_winner():
     update = SimpleNamespace(callback_query=query)
     asyncio.run(bot.handle_pick(update, None))
     assert query.answers == [(None, False)]
-    assert query.edited_text == messages.winner_message()
+    assert query.edited_media.caption == messages.winner_message()
+    assert query.edited_media.media.filename == "winner.jpg"
+    assert query.reply_markup_edits == [None]
     assert len(db.list_winners()) == 1
+
+
+def test_callback_handler_displays_losing_result_as_photo_caption():
+    pending = start(user_id=1, hidden_slot=50)
+    user = SimpleNamespace(id=1, username="alice", full_name="Alice")
+    query = FakeQuery(f"pick:{pending.game_id}:4", user)
+
+    asyncio.run(
+        bot.handle_pick(
+            SimpleNamespace(callback_query=query), SimpleNamespace(bot=FakeBot())
+        )
+    )
+
+    assert query.edited_caption in messages.LOSING_MESSAGES
+    assert query.edited_media is None
+    assert query.reply_markup_edits == [None]
 
 
 def test_admin_command_rejects_unconfigured_user(monkeypatch):
