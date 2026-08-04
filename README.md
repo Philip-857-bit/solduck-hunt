@@ -12,6 +12,7 @@ by an administrator. There is no wallet connection or blockchain integration.
 - Re-running the command before tapping restores the same pending game.
 - When one board is resolved, every duplicate board is closed automatically.
 - A winning tap replaces the game artwork with the branded winner image.
+- The winner image is personalized with the player's Telegram username or name.
 - Boxes use numbered `📦` buttons for a clearer 3×3 board.
 - Any selected box has exactly a 1-in-`WIN_CHANCE` chance to win (1 in 100 by
   default). Slots 0–8 represent the boxes and all remaining slots represent

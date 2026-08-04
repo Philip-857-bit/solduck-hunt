@@ -30,6 +30,7 @@ import config
 import db
 import game
 import messages
+import artwork
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -42,7 +43,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 PICK_RE = re.compile(r"^pick:(\d+):([0-8])$")
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
 GAME_BOARD_IMAGE = ASSET_DIRECTORY / "game-board.jpg"
-WINNER_IMAGE = ASSET_DIRECTORY / "winner.jpg"
 
 PUBLIC_COMMANDS = (BotCommand("findsolduck", "Play Find SolDuck"),)
 ADMIN_COMMANDS = PUBLIC_COMMANDS + (
@@ -231,7 +231,7 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     result_text: str
     if result is db.ResolveStatus.WON:
         logger.info("Winner recorded for Telegram user %s, game %s", query.from_user.id, game_id)
-        result_text = messages.winner_message()
+        result_text = messages.winner_message(display_name(query.from_user))
     else:
         result_text = game.random_losing_message()
     try:
@@ -239,7 +239,12 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if result is db.ResolveStatus.WON:
             await query.edit_message_media(
                 media=InputMediaPhoto(
-                    media=image_upload(WINNER_IMAGE),
+                    media=InputFile(
+                        artwork.render_winner_image(
+                            display_name(query.from_user)
+                        ),
+                        filename="winner.jpg",
+                    ),
                     caption=result_text,
                 )
             )

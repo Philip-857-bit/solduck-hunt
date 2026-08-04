@@ -20,9 +20,10 @@ def game_prompt() -> str:
     )
 
 
-def winner_message() -> str:
+def winner_message(winner_name: str | None = None) -> str:
+    winner_line = f"🏆 Winner: {winner_name}\n\n" if winner_name else ""
     return (
-        "🎉 Congratulations!\n\n"
+        f"{winner_line}🎉 Congratulations!\n\n"
         "🦆 You found SolDuck!\n\n"
         "🏆 You won:\n"
         f"{prize_text()} Tokens\n\n"

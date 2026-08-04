@@ -17,7 +17,7 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check \
     -r requirements.txt
 
 COPY --chown=solduck:solduck \
-    bot.py config.py db.py postgres_store.py game.py messages.py ./
+    bot.py config.py db.py postgres_store.py game.py messages.py artwork.py ./
 COPY --chown=solduck:solduck assets ./assets
 
 USER solduck

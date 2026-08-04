@@ -10,7 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from PIL import Image
 
+import artwork
 import bot
 import config
 import db
@@ -220,9 +222,35 @@ def test_docker_database_defaults_to_app_owned_directory():
 
 
 def test_game_and_winner_artwork_are_bundled():
-    for image_path in (bot.GAME_BOARD_IMAGE, bot.WINNER_IMAGE):
+    for image_path in (bot.GAME_BOARD_IMAGE, artwork.WINNER_TEMPLATE):
         assert image_path.is_file()
-        assert image_path.read_bytes().startswith(b"\xff\xd8\xff")
+    assert bot.GAME_BOARD_IMAGE.read_bytes().startswith(b"\xff\xd8\xff")
+    assert artwork.WINNER_TEMPLATE.read_bytes().startswith(b"\x89PNG")
+    assert artwork.WINNER_FONT.is_file()
+
+
+def test_personalized_winner_artwork_is_valid_telegram_jpeg():
+    rendered = artwork.render_winner_image("@alice")
+    with Image.open(rendered) as image:
+        assert image.format == "JPEG"
+        assert image.size == (1254, 1254)
+    assert rendered.getbuffer().nbytes < 10 * 1024 * 1024
+
+
+def test_personalized_artwork_changes_with_winner_and_handles_long_names():
+    alice = artwork.render_winner_image("@alice").getvalue()
+    bob = artwork.render_winner_image("@bob").getvalue()
+    long_name = artwork.render_winner_image("Duck " * 100).getvalue()
+
+    assert alice != bob
+    assert long_name.startswith(b"\xff\xd8\xff")
+
+
+def test_winner_label_removes_line_breaks_and_has_fallback():
+    assert artwork.winner_label("Alice\nDuck") == "WINNER: Alice Duck"
+    assert artwork.winner_label("Alice\u202eDuck") == "WINNER: AliceDuck"
+    assert len(artwork.winner_label("x" * 1_000)) <= len("WINNER: ") + 64
+    assert artwork.winner_label("  ") == "WINNER: SolDuck Player"
 
 
 def test_hidden_slot_uses_configured_probability_space(monkeypatch):
@@ -530,7 +558,7 @@ def test_resolving_one_board_closes_every_duplicate():
 
     asyncio.run(bot.handle_pick(SimpleNamespace(callback_query=query), context))
 
-    assert query.edited_media.caption == messages.winner_message()
+    assert query.edited_media.caption == messages.winner_message("@alice")
     assert query.edited_media.media.filename == "winner.jpg"
     assert context.bot.caption_edits == [(messages.GAME_OVER_MESSAGE, 20, 202)]
     assert context.bot.reply_markup_edits == [(None, 20, 202)]
@@ -605,10 +633,24 @@ def test_callback_handler_records_and_displays_winner():
     update = SimpleNamespace(callback_query=query)
     asyncio.run(bot.handle_pick(update, None))
     assert query.answers == [(None, False)]
-    assert query.edited_media.caption == messages.winner_message()
+    assert query.edited_media.caption == messages.winner_message("@alice")
     assert query.edited_media.media.filename == "winner.jpg"
     assert query.reply_markup_edits == [None]
     assert len(db.list_winners()) == 1
+
+
+def test_winner_caption_identifies_player_with_full_name_fallback():
+    pending = start(user_id=7, hidden_slot=4)
+    user = SimpleNamespace(id=7, username=None, full_name="Alice Duck")
+    query = FakeQuery(f"pick:{pending.game_id}:4", user)
+
+    asyncio.run(
+        bot.handle_pick(
+            SimpleNamespace(callback_query=query), SimpleNamespace(bot=FakeBot())
+        )
+    )
+
+    assert query.edited_media.caption.startswith("🏆 Winner: Alice Duck\n")
 
 
 def test_callback_handler_displays_losing_result_as_photo_caption():
