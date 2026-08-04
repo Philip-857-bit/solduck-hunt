@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -43,6 +44,8 @@ def test_configuration_accepts_v1_defaults(monkeypatch):
     monkeypatch.setattr(config, "PRIZE_AMOUNT", 10_000)
     monkeypatch.setattr(config, "PRIZE_TOKEN", "SOLDUCK")
     monkeypatch.setattr(config, "DB_PATH", "solduck.db")
+    monkeypatch.setattr(config, "DATABASE_URL", "")
+    monkeypatch.delenv("RENDER", raising=False)
     config.validate(require_credentials=False)
 
 
@@ -50,6 +53,63 @@ def test_configuration_rejects_chance_below_box_count(monkeypatch):
     monkeypatch.setattr(config, "WIN_CHANCE", 8)
     with pytest.raises(ValueError, match="at least 9"):
         config.validate(require_credentials=False)
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "mysql://user:password@example.com/database",
+        "postgresql:///database",
+        "postgresql://example.com",
+        "postgresql://[invalid/database",
+    ],
+)
+def test_configuration_rejects_invalid_postgres_url(monkeypatch, database_url):
+    monkeypatch.setattr(config, "DATABASE_URL", database_url)
+    with pytest.raises(ValueError, match="valid PostgreSQL connection URL"):
+        config.validate(require_credentials=False)
+
+
+def test_render_requires_postgres_for_persistent_state(monkeypatch):
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setattr(config, "BOT_TOKEN", "token")
+    monkeypatch.setattr(config, "ADMIN_IDS", {1})
+    monkeypatch.setattr(config, "WEBHOOK_URL", "https://example.com/telegram")
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "a-secure_token-123")
+    monkeypatch.setattr(config, "DATABASE_URL", "")
+    with pytest.raises(ValueError, match="DATABASE_URL is required on Render"):
+        config.validate()
+
+
+def test_database_facade_uses_postgres_when_configured(monkeypatch):
+    import postgres_store
+
+    store = Mock()
+    store.get_stats.return_value = (4, 2, 3)
+    constructor = Mock(return_value=store)
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://host/database")
+    monkeypatch.setattr(postgres_store, "PostgresStore", constructor)
+
+    db.init()
+
+    constructor.assert_called_once_with("postgresql://host/database")
+    assert db.get_stats() == (4, 2, 3)
+    store.get_stats.assert_called_once_with()
+    db.close()
+    store.close.assert_called_once_with()
+
+
+def test_explicit_sqlite_path_overrides_configured_postgres(monkeypatch):
+    import postgres_store
+
+    constructor = Mock()
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://host/database")
+    monkeypatch.setattr(postgres_store, "PostgresStore", constructor)
+
+    db.init(":memory:")
+
+    constructor.assert_not_called()
+    assert db.get_stats() == (0, 0, 0)
 
 
 def test_webhook_configuration_requires_secure_public_url(monkeypatch):
@@ -117,19 +177,36 @@ def test_command_menus_are_registered_by_scope(monkeypatch):
     asyncio.run(bot.register_commands(application))
 
     calls = telegram_bot.set_my_commands.await_args_list
-    assert len(calls) == 3
+    assert len(calls) == 1
     public_commands, public_scope = calls[0].args[0], calls[0].kwargs["scope"]
     assert [command.command for command in public_commands] == ["findsolduck"]
     assert isinstance(public_scope, BotCommandScopeDefault)
 
-    admin_scopes = [call.kwargs["scope"] for call in calls[1:]]
-    assert all(isinstance(scope, BotCommandScopeChat) for scope in admin_scopes)
-    assert [scope.chat_id for scope in admin_scopes] == [11, 22]
-    assert all(
-        [command.command for command in call.args[0]]
-        == ["findsolduck", "winnerlist", "stats"]
-        for call in calls[1:]
+
+def test_admin_menu_is_registered_after_private_interaction(monkeypatch):
+    telegram_bot = SimpleNamespace(set_my_commands=AsyncMock())
+    context = SimpleNamespace(bot=telegram_bot)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=11),
+        effective_chat=SimpleNamespace(id=11, type="private"),
     )
+    monkeypatch.setattr(config, "ADMIN_IDS", {11})
+
+    asyncio.run(bot.register_private_admin_commands(update, context))
+
+    commands = telegram_bot.set_my_commands.await_args.args[0]
+    scope = telegram_bot.set_my_commands.await_args.kwargs["scope"]
+    assert [command.command for command in commands] == [
+        "findsolduck",
+        "winnerlist",
+        "stats",
+    ]
+    assert isinstance(scope, BotCommandScopeChat)
+    assert scope.chat_id == 11
+
+
+def test_http_client_logs_do_not_expose_telegram_urls():
+    assert logging.getLogger("httpx").level >= logging.WARNING
 
 
 def test_docker_database_defaults_to_app_owned_directory():
@@ -199,7 +276,9 @@ def test_opening_board_does_not_start_cooldown_and_reuses_pending_game():
 def test_cooldown_starts_on_tap_and_expires_at_exact_boundary():
     first = start(now=100)
     assert resolve(first.game_id, now=200) is db.ResolveStatus.WON
-    assert start(now=200 + 86_399).status is db.StartStatus.COOLDOWN
+    blocked = start(now=200 + 1)
+    assert blocked.status is db.StartStatus.COOLDOWN
+    assert blocked.retry_after_seconds == 86_399
     after = start(hidden_slot=8, now=200 + 86_400)
     assert after.status is db.StartStatus.READY
     assert after.game_id != first.game_id
@@ -270,6 +349,11 @@ def test_cooldown_message_uses_configured_duration(monkeypatch):
     text = messages.cooldown_message()
     assert "48 hours" in text
     assert "tomorrow" not in text.lower()
+
+
+def test_cooldown_message_shows_exact_time_remaining():
+    text = messages.cooldown_message(90_061)
+    assert "1d 1h 1m 1s" in text
 
 
 def test_winner_date_is_formatted_in_utc():

@@ -16,7 +16,8 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir --disable-pip-version-check \
     -r requirements.txt
 
-COPY --chown=solduck:solduck bot.py config.py db.py game.py messages.py ./
+COPY --chown=solduck:solduck \
+    bot.py config.py db.py postgres_store.py game.py messages.py ./
 
 USER solduck
 EXPOSE 8080

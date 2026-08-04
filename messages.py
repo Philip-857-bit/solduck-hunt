@@ -33,11 +33,32 @@ def winner_message() -> str:
     )
 
 
-def cooldown_message() -> str:
+def _format_duration(total_seconds: int) -> str:
+    remaining = max(0, int(total_seconds))
+    days, remaining = divmod(remaining, 86_400)
+    hours, remaining = divmod(remaining, 3_600)
+    minutes, seconds = divmod(remaining, 60)
+    parts = []
+    for value, suffix in (
+        (days, "d"),
+        (hours, "h"),
+        (minutes, "m"),
+        (seconds, "s"),
+    ):
+        if value:
+            parts.append(f"{value}{suffix}")
+    return " ".join(parts) or "0s"
+
+
+def cooldown_message(remaining_seconds: int | None = None) -> str:
     unit = "hour" if config.COOLDOWN_HOURS == 1 else "hours"
+    remaining_line = ""
+    if remaining_seconds is not None:
+        remaining_line = f"\n⏱ Time remaining: {_format_duration(remaining_seconds)}"
     return (
         "⏳ You already played.\n\n"
-        f"You can play once every {config.COOLDOWN_HOURS} {unit}.\n"
+        f"You can play once every {config.COOLDOWN_HOURS} {unit}."
+        f"{remaining_line}\n"
         f"Come back when your cooldown ends for another chance to win "
         f"{prize_text()} Tokens!"
     )

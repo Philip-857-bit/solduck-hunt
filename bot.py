@@ -14,6 +14,7 @@ from telegram import (
     Update,
 )
 from telegram.error import TelegramError
+from telegram.constants import ChatType
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -32,6 +33,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 PICK_RE = re.compile(r"^pick:(\d+):([0-8])$")
 
@@ -43,7 +46,7 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + (
 
 
 async def register_commands(application: Application) -> None:
-    """Register public and private admin command menus with Telegram."""
+    """Register the public command menu with Telegram."""
     try:
         await application.bot.set_my_commands(
             PUBLIC_COMMANDS, scope=BotCommandScopeDefault()
@@ -51,17 +54,27 @@ async def register_commands(application: Application) -> None:
     except TelegramError as exc:
         logger.warning("Could not register the public command menu: %s", exc)
 
-    for admin_id in sorted(config.ADMIN_IDS):
-        try:
-            await application.bot.set_my_commands(
-                ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
-            )
-        except TelegramError as exc:
-            logger.warning(
-                "Could not register the admin command menu for user %s: %s",
-                admin_id,
-                exc,
-            )
+
+async def register_private_admin_commands(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Register admin commands after Telegram has established the private chat."""
+    user = update.effective_user
+    chat = getattr(update, "effective_chat", None)
+    if (
+        context is None
+        or user is None
+        or chat is None
+        or chat.type != ChatType.PRIVATE
+        or user.id not in config.ADMIN_IDS
+    ):
+        return
+    try:
+        await context.bot.set_my_commands(
+            ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=chat.id)
+        )
+    except TelegramError as exc:
+        logger.warning("Could not register the private admin command menu: %s", exc)
 
 
 def build_keyboard(game_id: int) -> InlineKeyboardMarkup:
@@ -95,6 +108,7 @@ async def find_solduck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.effective_message
     if user is None or message is None:
         return
+    await register_private_admin_commands(update, context)
 
     result = db.start_or_resume_game(
         user.id,
@@ -103,7 +117,9 @@ async def find_solduck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         cooldown_seconds_for(user.id),
     )
     if result.status is db.StartStatus.COOLDOWN:
-        await message.reply_text(messages.cooldown_message())
+        await message.reply_text(
+            messages.cooldown_message(result.retry_after_seconds)
+        )
         return
 
     board_message = await message.reply_text(
@@ -217,6 +233,7 @@ async def winnerlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     message = update.effective_message
     if user is None or message is None:
         return
+    await register_private_admin_commands(update, context)
     if not _is_admin(user.id):
         await message.reply_text(messages.ADMINS_ONLY_MESSAGE)
         return
@@ -234,6 +251,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if user is None or message is None:
         return
+    await register_private_admin_commands(update, context)
     if not _is_admin(user.id):
         await message.reply_text(messages.ADMINS_ONLY_MESSAGE)
         return

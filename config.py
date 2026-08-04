@@ -19,6 +19,7 @@ COOLDOWN_HOURS = 24
 PRIZE_AMOUNT = 10_000
 PRIZE_TOKEN = "SOLDUCK"
 DB_PATH = "solduck.db"
+DATABASE_URL = ""
 WEBHOOK_URL = ""
 WEBHOOK_SECRET = ""
 WEBHOOK_LISTEN = "0.0.0.0"
@@ -52,6 +53,7 @@ def load(*, require_credentials: bool = True) -> None:
     """Parse environment values, then validate the complete configuration."""
     global BOT_TOKEN, ADMIN_IDS, WIN_CHANCE, COOLDOWN_HOURS
     global PRIZE_AMOUNT, PRIZE_TOKEN, DB_PATH
+    global DATABASE_URL
     global WEBHOOK_URL, WEBHOOK_SECRET, WEBHOOK_LISTEN, PORT
 
     bot_token = os.environ.get("BOT_TOKEN", "").strip()
@@ -61,6 +63,7 @@ def load(*, require_credentials: bool = True) -> None:
     prize_amount = _integer("PRIZE_AMOUNT", "10000")
     prize_token = os.environ.get("PRIZE_TOKEN", "SOLDUCK").strip()
     db_path = os.environ.get("DB_PATH", "solduck.db").strip()
+    database_url = os.environ.get("DATABASE_URL", "").strip()
     webhook_url = os.environ.get("WEBHOOK_URL", "").strip().rstrip("/")
     webhook_secret = os.environ.get("WEBHOOK_SECRET", "").strip()
     webhook_listen = os.environ.get("WEBHOOK_LISTEN", "0.0.0.0").strip()
@@ -73,6 +76,7 @@ def load(*, require_credentials: bool = True) -> None:
     PRIZE_AMOUNT = prize_amount
     PRIZE_TOKEN = prize_token
     DB_PATH = db_path
+    DATABASE_URL = database_url
     WEBHOOK_URL = webhook_url
     WEBHOOK_SECRET = webhook_secret
     WEBHOOK_LISTEN = webhook_listen
@@ -95,6 +99,12 @@ def validate(*, require_credentials: bool = True) -> None:
         raise ValueError("WEBHOOK_URL is required")
     if require_credentials and not WEBHOOK_SECRET:
         raise ValueError("WEBHOOK_SECRET is required")
+    if (
+        require_credentials
+        and os.environ.get("RENDER", "").lower() == "true"
+        and not DATABASE_URL
+    ):
+        raise ValueError("DATABASE_URL is required on Render for persistent storage")
     if WIN_CHANCE < 9:
         raise ValueError("WIN_CHANCE must be at least 9 for a nine-box game")
     if COOLDOWN_HOURS <= 0:
@@ -103,8 +113,22 @@ def validate(*, require_credentials: bool = True) -> None:
         raise ValueError("PRIZE_AMOUNT must be greater than zero")
     if not PRIZE_TOKEN:
         raise ValueError("PRIZE_TOKEN cannot be empty")
-    if not DB_PATH:
+    if not DATABASE_URL and not DB_PATH:
         raise ValueError("DB_PATH cannot be empty")
+    if DATABASE_URL:
+        try:
+            parsed_database_url = urlsplit(DATABASE_URL)
+            database_hostname = parsed_database_url.hostname
+        except ValueError as exc:
+            raise ValueError(
+                "DATABASE_URL must be a valid PostgreSQL connection URL"
+            ) from exc
+        if (
+            parsed_database_url.scheme not in ("postgres", "postgresql")
+            or not database_hostname
+            or not parsed_database_url.path.strip("/")
+        ):
+            raise ValueError("DATABASE_URL must be a valid PostgreSQL connection URL")
     if not WEBHOOK_LISTEN:
         raise ValueError("WEBHOOK_LISTEN cannot be empty")
     if not 1 <= PORT <= 65_535:

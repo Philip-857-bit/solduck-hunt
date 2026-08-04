@@ -8,6 +8,7 @@ by an administrator. There is no wallet connection or blockchain integration.
 
 - `/findsolduck` shows a 3×3 inline-button board.
 - The first valid box tap completes the game and starts the cooldown.
+- Cooldown responses show the exact days, hours, minutes, and seconds remaining.
 - Re-running the command before tapping restores the same pending game.
 - When one board is resolved, every duplicate board is closed automatically.
 - Boxes use numbered `📦` buttons for a clearer 3×3 board.
@@ -48,34 +49,34 @@ serves HTTP internally on `WEBHOOK_LISTEN:PORT`.
 
 ## Docker
 
-Build the image and run it with credentials from `.env` and a named volume for
-the SQLite database:
+Build the image and run it with credentials from `.env`:
 
 ```powershell
 docker build -t solduck-bot .
 docker run -d --name solduck-bot --restart unless-stopped `
   --env-file .env `
   --publish 8080:8080 `
-  --mount source=solduck-data,target=/app/data `
   solduck-bot
 ```
 
 The image runs as an unprivileged user, does not copy `.env` into the image, and
-uses `/app/data/solduck.db` by default. Back up the `solduck-data` volume to
-preserve cooldowns and winner records when moving hosts.
+uses PostgreSQL whenever `DATABASE_URL` is set. For local SQLite use, omit
+`DATABASE_URL` and optionally mount a named volume at `/app/data` to preserve
+`/app/data/solduck.db` across container replacements.
 
 ### Render
 
-For a Render Docker web service, set `WEBHOOK_URL` to your service URL plus the
-webhook path, for example `https://your-service.onrender.com/telegram`. Do not
-set `DB_PATH=solduck.db`; either omit it to use `/app/data/solduck.db` or set that
-absolute path explicitly.
+For a Render Docker web service:
 
-Render free web services have an ephemeral filesystem and cannot attach a
-persistent disk. The bot will run, but SQLite cooldowns, statistics, and winner
-records are erased whenever the service restarts, redeploys, or spins down. For
-reliable rewards, use a paid Render persistent disk mounted at `/app/data` or
-move storage to an external database.
+1. Create a PostgreSQL database (on Render or another provider).
+2. Set `DATABASE_URL` on the bot service to its PostgreSQL connection URL. Use
+   Render's internal database URL when both services are in the same region.
+3. Set `WEBHOOK_URL` to the public service URL plus the webhook path, such as
+   `https://your-service.onrender.com/telegram`.
+
+The bot intentionally refuses to start on Render without `DATABASE_URL` because
+free web-service filesystems are ephemeral. PostgreSQL preserves cooldowns,
+active boards, winner records, and statistics across redeploys and spin-downs.
 
 ## Commands
 
@@ -85,10 +86,10 @@ move storage to an external database.
 | `/winnerlist` | Admins | Show every recorded winner, newest first |
 | `/stats` | Admins | Show completed games, winners, and players |
 
-The bot registers these command menus automatically at startup. The default
-menu shows only `/findsolduck`; each configured admin gets `/winnerlist` and
-`/stats` in the bot's private-chat menu as well. Handler authorization still
-checks the sender's numeric Telegram ID.
+The bot registers `/findsolduck` automatically at startup. Telegram creates an
+admin's scoped menu only after that admin messages the bot privately; it then
+adds `/winnerlist` and `/stats` to that private-chat menu. Handler authorization
+still checks the sender's numeric Telegram ID.
 
 ## Configuration
 
@@ -104,7 +105,8 @@ checks the sender's numeric Telegram ID.
 | `COOLDOWN_HOURS` | `24` | Rolling cooldown after a box tap |
 | `PRIZE_AMOUNT` | `10000` | Recorded with each winner |
 | `PRIZE_TOKEN` | `SOLDUCK` | Recorded with each winner |
-| `DB_PATH` | Runtime-specific | Local default `solduck.db`; Docker default `/app/data/solduck.db` |
+| `DATABASE_URL` | — | PostgreSQL URL; required on Render and preferred in production |
+| `DB_PATH` | Runtime-specific | SQLite fallback only; local default `solduck.db`, Docker default `/app/data/solduck.db` |
 
 ## Tests
 
@@ -112,6 +114,7 @@ checks the sender's numeric Telegram ID.
 python -m pytest -q
 ```
 
-The code is split into Telegram handlers (`bot.py`), atomic SQLite operations
-(`db.py`), pure game rules (`game.py`), configuration (`config.py`), and message
-formatting (`messages.py`) so additional games can be added later.
+The code is split into Telegram handlers (`bot.py`), a storage facade (`db.py`),
+PostgreSQL production storage (`postgres_store.py`), pure game rules (`game.py`),
+configuration (`config.py`), and message formatting (`messages.py`) so additional
+games can be added later.

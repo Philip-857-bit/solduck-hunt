@@ -1,4 +1,4 @@
-"""SQLite persistence and atomic game-state transitions."""
+"""Persistence facade for PostgreSQL production and SQLite local storage."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import config
 
@@ -73,6 +74,7 @@ PRAGMA user_version = 2;
 """
 
 _conn: sqlite3.Connection | None = None
+_postgres_store: Any | None = None
 _lock = threading.RLock()
 
 
@@ -85,6 +87,7 @@ class StartStatus(Enum):
 class StartResult:
     status: StartStatus
     game_id: int | None = None
+    retry_after_seconds: int | None = None
 
 
 class ResolveStatus(Enum):
@@ -97,9 +100,15 @@ class ResolveStatus(Enum):
 
 
 def init(db_path: str | None = None) -> None:
-    """Open a database and create the v1 schema."""
-    global _conn
+    """Open configured PostgreSQL storage, or an explicit/local SQLite DB."""
+    global _conn, _postgres_store
     close()
+    if db_path is None and config.DATABASE_URL:
+        from postgres_store import PostgresStore
+
+        _postgres_store = PostgresStore(config.DATABASE_URL)
+        return
+
     path = db_path or config.DB_PATH
     connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     connection.row_factory = sqlite3.Row
@@ -123,7 +132,10 @@ def init(db_path: str | None = None) -> None:
 
 
 def close() -> None:
-    global _conn
+    global _conn, _postgres_store
+    if _postgres_store is not None:
+        _postgres_store.close()
+        _postgres_store = None
     if _conn is not None:
         _conn.close()
         _conn = None
@@ -165,6 +177,15 @@ def start_or_resume_game(
     now: int | None = None,
 ) -> StartResult:
     """Atomically enforce cooldown and return one pending game per user."""
+    if _postgres_store is not None:
+        return _postgres_store.start_or_resume_game(
+            user_id,
+            display_name,
+            hidden_slot,
+            cooldown_seconds,
+            now=now,
+        )
+
     timestamp = int(time.time()) if now is None else now
     with _lock:
         connection = _begin()
@@ -175,8 +196,11 @@ def start_or_resume_game(
                 (user_id,),
             ).fetchone()[0]
             if last is not None and timestamp - last < cooldown_seconds:
+                retry_after = cooldown_seconds - (timestamp - last)
                 connection.commit()
-                return StartResult(StartStatus.COOLDOWN)
+                return StartResult(
+                    StartStatus.COOLDOWN, retry_after_seconds=retry_after
+                )
 
             pending = connection.execute(
                 "SELECT id FROM games WHERE user_id = ? AND played_at IS NULL",
@@ -208,6 +232,16 @@ def resolve_game(
     now: int | None = None,
 ) -> ResolveStatus:
     """Resolve a pick and record any winner in one transaction."""
+    if _postgres_store is not None:
+        return _postgres_store.resolve_game(
+            game_id,
+            user_id,
+            display_name,
+            selected_box,
+            cooldown_seconds,
+            now=now,
+        )
+
     if not 0 <= selected_box < 9:
         return ResolveStatus.NOT_FOUND
 
@@ -268,13 +302,17 @@ def resolve_game(
             raise
 
 
-def get_game(game_id: int) -> sqlite3.Row | None:
+def get_game(game_id: int) -> sqlite3.Row | dict[str, Any] | None:
+    if _postgres_store is not None:
+        return _postgres_store.get_game(game_id)
     with _lock:
         return _db().execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
 
 
 def record_game_message(game_id: int, chat_id: int, message_id: int) -> bool:
     """Register a board message only while its game is still pending."""
+    if _postgres_store is not None:
+        return _postgres_store.record_game_message(game_id, chat_id, message_id)
     with _lock:
         connection = _db()
         pending = connection.execute(
@@ -293,7 +331,9 @@ def record_game_message(game_id: int, chat_id: int, message_id: int) -> bool:
         return True
 
 
-def list_game_messages(game_id: int) -> list[sqlite3.Row]:
+def list_game_messages(game_id: int) -> list[sqlite3.Row] | list[dict[str, Any]]:
+    if _postgres_store is not None:
+        return _postgres_store.list_game_messages(game_id)
     with _lock:
         return _db().execute(
             """
@@ -307,6 +347,9 @@ def list_game_messages(game_id: int) -> list[sqlite3.Row]:
 
 
 def remove_game_message(chat_id: int, message_id: int) -> None:
+    if _postgres_store is not None:
+        _postgres_store.remove_game_message(chat_id, message_id)
+        return
     with _lock:
         _db().execute(
             "DELETE FROM game_messages WHERE chat_id = ? AND message_id = ?",
@@ -314,7 +357,9 @@ def remove_game_message(chat_id: int, message_id: int) -> None:
         )
 
 
-def list_winners() -> list[sqlite3.Row]:
+def list_winners() -> list[sqlite3.Row] | list[dict[str, Any]]:
+    if _postgres_store is not None:
+        return _postgres_store.list_winners()
     with _lock:
         return _db().execute(
             "SELECT * FROM winners ORDER BY won_at DESC, id DESC"
@@ -323,6 +368,8 @@ def list_winners() -> list[sqlite3.Row]:
 
 def get_stats() -> tuple[int, int, int]:
     """Return completed games, winners, and unique command users."""
+    if _postgres_store is not None:
+        return _postgres_store.get_stats()
     with _lock:
         row = _db().execute(
             """
