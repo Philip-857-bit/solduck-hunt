@@ -18,7 +18,7 @@ import config
 import db
 import game
 import messages
-from telegram import BotCommandScopeChat, BotCommandScopeDefault
+from telegram import BotCommandScopeChat, BotCommandScopeDefault, InputMediaAnimation
 
 
 @pytest.fixture(autouse=True)
@@ -227,6 +227,9 @@ def test_game_and_winner_artwork_are_bundled():
     assert bot.GAME_BOARD_IMAGE.read_bytes().startswith(b"\xff\xd8\xff")
     assert artwork.WINNER_TEMPLATE.read_bytes().startswith(b"\x89PNG")
     assert artwork.WINNER_FONT.is_file()
+    assert bot.LOSER_ANIMATION.is_file()
+    assert bot.LOSER_ANIMATION.suffix == ".mp4"
+    assert bot.LOSER_ANIMATION.stat().st_size < 10 * 1024 * 1024
 
 
 def test_personalized_winner_artwork_is_valid_telegram_jpeg():
@@ -653,7 +656,7 @@ def test_winner_caption_identifies_player_with_full_name_fallback():
     assert query.edited_media.caption.startswith("🏆 Winner: Alice Duck\n")
 
 
-def test_callback_handler_displays_losing_result_as_photo_caption():
+def test_callback_handler_displays_losing_result_as_animation():
     pending = start(user_id=1, hidden_slot=50)
     user = SimpleNamespace(id=1, username="alice", full_name="Alice")
     query = FakeQuery(f"pick:{pending.game_id}:4", user)
@@ -664,8 +667,11 @@ def test_callback_handler_displays_losing_result_as_photo_caption():
         )
     )
 
-    assert query.edited_caption in messages.LOSING_MESSAGES
-    assert query.edited_media is None
+    assert query.edited_media.caption in messages.LOSING_MESSAGES
+    assert isinstance(query.edited_media, InputMediaAnimation)
+    assert query.edited_media.media.filename == "loser-animation.mp4"
+    assert b"ftyp" in query.edited_media.media.input_file_content[:32]
+    assert query.edited_caption is None
     assert query.reply_markup_edits == [None]
 
 

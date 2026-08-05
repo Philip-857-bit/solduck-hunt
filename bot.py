@@ -13,6 +13,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
+    InputMediaAnimation,
     InputMediaPhoto,
     Update,
 )
@@ -43,6 +44,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 PICK_RE = re.compile(r"^pick:(\d+):([0-8])$")
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
 GAME_BOARD_IMAGE = ASSET_DIRECTORY / "game-board.jpg"
+LOSER_ANIMATION = ASSET_DIRECTORY / "loser-animation.mp4"
 
 PUBLIC_COMMANDS = (BotCommand("findsolduck", "Play Find SolDuck"),)
 ADMIN_COMMANDS = PUBLIC_COMMANDS + (
@@ -249,7 +251,12 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             )
         else:
-            await query.edit_message_caption(caption=result_text)
+            await query.edit_message_media(
+                media=InputMediaAnimation(
+                    media=image_upload(LOSER_ANIMATION),
+                    caption=result_text,
+                )
+            )
     except TelegramError:
         logger.warning("Could not replace selected board with its result", exc_info=True)
     else:
