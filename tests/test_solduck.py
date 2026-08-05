@@ -563,6 +563,7 @@ def test_resolving_one_board_closes_every_duplicate():
 
     assert query.edited_media.caption == messages.winner_message("@alice")
     assert query.edited_media.media.filename == "winner.jpg"
+    assert query.edited_media.media.attach_uri.startswith("attach://")
     assert context.bot.caption_edits == [(messages.GAME_OVER_MESSAGE, 20, 202)]
     assert context.bot.reply_markup_edits == [(None, 20, 202)]
 
@@ -670,6 +671,7 @@ def test_callback_handler_displays_losing_result_as_animation():
     assert query.edited_media.caption in messages.LOSING_MESSAGES
     assert isinstance(query.edited_media, InputMediaAnimation)
     assert query.edited_media.media.filename == "loser-animation.mp4"
+    assert query.edited_media.media.attach_uri.startswith("attach://")
     assert b"ftyp" in query.edited_media.media.input_file_content[:32]
     assert query.edited_caption is None
     assert query.reply_markup_edits == [None]

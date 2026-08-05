@@ -241,19 +241,18 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if result is db.ResolveStatus.WON:
             await query.edit_message_media(
                 media=InputMediaPhoto(
-                    media=InputFile(
-                        artwork.render_winner_image(
-                            display_name(query.from_user)
-                        ),
-                        filename="winner.jpg",
+                    media=artwork.render_winner_image(
+                        display_name(query.from_user)
                     ),
+                    filename="winner.jpg",
                     caption=result_text,
                 )
             )
         else:
             await query.edit_message_media(
                 media=InputMediaAnimation(
-                    media=image_upload(LOSER_ANIMATION),
+                    media=LOSER_ANIMATION.read_bytes(),
+                    filename="loser-animation.mp4",
                     caption=result_text,
                 )
             )
