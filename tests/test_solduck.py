@@ -382,6 +382,10 @@ def test_losing_messages_are_selected_from_configured_pool():
         assert game.random_losing_message() in messages.LOSING_MESSAGES
 
 
+def test_losing_messages_do_not_include_the_confusing_egg_result():
+    assert all("egg" not in message.lower() for message in messages.LOSING_MESSAGES)
+
+
 def test_cooldown_message_uses_configured_duration(monkeypatch):
     monkeypatch.setattr(config, "COOLDOWN_HOURS", 48)
     text = messages.cooldown_message()

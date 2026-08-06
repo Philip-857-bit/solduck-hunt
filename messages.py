@@ -65,7 +65,6 @@ def cooldown_message(remaining_seconds: int | None = None) -> str:
 
 LOSING_MESSAGES = (
     "😂 SolDuck flew away!",
-    "🥚 You found an egg.",
     "🐸 Just a frog.",
     "🦊 Wrong animal!",
     "🚀 SolDuck escaped!",
